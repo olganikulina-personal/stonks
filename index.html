@@ -1,0 +1,248 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Paper Trading Tracker</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+<script src="data.js"></script>
+<style>
+  :root { --bg:#f6f7f9; --card:#fff; --ink:#1d2433; --muted:#6b7280; --line:#e5e7eb;
+          --up:#0f8a4b; --down:#c62828; --warn:#b26a00; }
+  * { box-sizing: border-box; }
+  body { margin:0; font:15px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+         background:var(--bg); color:var(--ink); }
+  main { max-width:1100px; margin:0 auto; padding:16px; }
+  h1 { font-size:1.5rem; margin:.25rem 0 0; }
+  h2 { font-size:1.1rem; margin:0 0 .75rem; }
+  .sub { color:var(--muted); font-size:.9rem; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:16px; margin:14px 0; }
+  .kpis { display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:10px; }
+  .kpi { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:12px; }
+  .kpi .label { color:var(--muted); font-size:.8rem; text-transform:uppercase; letter-spacing:.03em; }
+  .kpi .value { font-size:1.35rem; font-weight:600; }
+  .up { color:var(--up); } .down { color:var(--down); }
+  .scroll { overflow-x:auto; }
+  table { border-collapse:collapse; width:100%; font-size:.9rem; }
+  th, td { padding:6px 8px; border-bottom:1px solid var(--line); text-align:left; vertical-align:top; }
+  th { color:var(--muted); font-weight:600; white-space:nowrap; }
+  td.n, th.n { text-align:right; white-space:nowrap; font-variant-numeric:tabular-nums; }
+  .grid td.n { min-width:64px; }
+  .held { font-weight:700; }
+  .tag { display:inline-block; font-size:.75rem; padding:1px 7px; border-radius:999px; background:#eef1f5; color:#374151; margin:1px 2px 1px 0; }
+  .st-HOLD { background:#e6f4ec; color:var(--up); }
+  .st-WATCH { background:#fff4e0; color:var(--warn); }
+  .st-SWITCH { background:#fdecec; color:var(--down); }
+  .chart-wrap { position:relative; height:320px; }
+  .toolbar { display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-bottom:8px; }
+  button, select { font:inherit; padding:4px 10px; border:1px solid var(--line); border-radius:6px; background:#fff; cursor:pointer; }
+  button.on { background:var(--ink); color:#fff; border-color:var(--ink); }
+  .headline { border-top:1px solid var(--line); padding:10px 0; }
+  .headline:first-child { border-top:0; }
+  .headline .meta { font-size:.82rem; color:var(--muted); margin-top:3px; }
+  .headline .impl { font-size:.88rem; margin-top:4px; }
+  details { margin-top:10px; } summary { cursor:pointer; font-weight:600; }
+  .decision { background:#f3f6fb; border-left:3px solid #4b6cb7; padding:8px 12px; border-radius:4px; }
+  footer { color:var(--muted); font-size:.8rem; margin:24px 0; }
+  a { color:#2f5fb3; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>📈 Paper Trading Tracker</h1>
+    <div class="sub" id="asof"></div>
+  </header>
+
+  <section class="kpis" id="kpis"></section>
+
+  <section class="card">
+    <h2>Account value</h2>
+    <div class="chart-wrap"><canvas id="equityChart"></canvas></div>
+  </section>
+
+  <section class="card">
+    <h2>Each stock vs. its September 16 close</h2>
+    <div class="toolbar">
+      <button id="showHeld" class="on">Currently owned</button>
+      <button id="showAll">Owned + alternatives</button>
+      <span class="sub">Solid = owned · dashed = alternative being watched · click legend to hide/show</span>
+    </div>
+    <div class="chart-wrap"><canvas id="returnsChart"></canvas></div>
+  </section>
+
+  <section class="card">
+    <h2>Current holdings</h2>
+    <div class="scroll"><table id="holdings"></table></div>
+  </section>
+
+  <section class="card">
+    <h2>Owned vs. alternative (since Sept 16)</h2>
+    <div class="sub" style="margin-bottom:6px">Gap = alternative return − owned return. Positive means the alternative is doing better.</div>
+    <div class="scroll"><table id="pairs"></table></div>
+  </section>
+
+  <section class="card">
+    <h2>Return since Sept 16, by date</h2>
+    <div class="scroll"><table id="grid" class="grid"></table></div>
+  </section>
+
+  <section class="card">
+    <h2>Reviews &amp; headlines</h2>
+    <div class="toolbar"><label for="reviewSel">Review date:</label> <select id="reviewSel"></select></div>
+    <div id="review"></div>
+  </section>
+
+  <section class="card">
+    <h2>Trades</h2>
+    <div class="scroll"><table id="trades"></table></div>
+  </section>
+
+  <footer>
+    Simulated paper-trading account for a class project — not investment advice. Returns are raw closing-price
+    returns (no dividends). Values are approximate marks: shares × closing price, plus simulated cash.
+    <span id="gen"></span>
+  </footer>
+</main>
+
+<script>
+const D = window.DATA;
+const S = D.series, last = S[S.length - 1], prev = S[S.length - 2];
+const usd = (v, d = 2) => v.toLocaleString("en-US", { style: "currency", currency: "USD", minimumFractionDigits: d, maximumFractionDigits: d });
+const pct = (v, d = 2) => (v > 0 ? "+" : v < 0 ? "−" : "") + Math.abs(v * 100).toFixed(d) + "%";
+const sgnUsd = v => (v > 0 ? "+" : v < 0 ? "−" : "") + usd(Math.abs(v));
+const cls = v => v > 0 ? "up" : v < 0 ? "down" : "";
+const esc = s => String(s).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+const fmtDate = iso => new Date(iso + "T12:00:00").toLocaleDateString("en-US", { month: "short", day: "numeric" });
+const heldNow = new Set(last.holdings.map(h => h.ticker));
+const sectorOf = {}; D.sectors.forEach(s => s.tickers.forEach(t => sectorOf[t] = s.sector));
+const palette = ["#2f5fb3", "#c2185b", "#00897b", "#ef6c00", "#6a1b9a", "#5d4037", "#1e88e5", "#7cb342"];
+const colorOf = {}; D.sectors.forEach((s, i) => s.tickers.forEach(t => colorOf[t] = palette[i % palette.length]));
+const statusClass = s => { const u = s.toUpperCase(); return u.includes("SWITCH") ? "st-SWITCH" : u.includes("WATCH") ? "st-WATCH" : u.includes("HOLD") ? "st-HOLD" : ""; };
+
+// Header + KPIs
+document.getElementById("asof").textContent =
+  `As of ${fmtDate(last.date)} close · started ${fmtDate(D.baseline_date)} with ${usd(D.start_capital, 0)}`;
+document.getElementById("gen").textContent = `Last updated ${D.generated.replace("T", " ")}.`;
+const totalRet = last.equity / D.start_capital - 1;
+const kpis = [
+  ["Account value", usd(last.equity), ""],
+  ["Total return", pct(totalRet), cls(totalRet)],
+  ["Since last review", sgnUsd(last.equity - prev.equity), cls(last.equity - prev.equity)],
+  ["Unrealized P&L", sgnUsd(last.unrealized), cls(last.unrealized)],
+  ["Realized P&L", sgnUsd(last.realized), cls(last.realized)],
+  ["Cash", usd(last.cash), ""],
+];
+document.getElementById("kpis").innerHTML = kpis.map(([l, v, c]) =>
+  `<div class="kpi"><div class="label">${l}</div><div class="value ${c}">${v}</div></div>`).join("");
+
+// Equity chart
+const labels = S.map(p => fmtDate(p.date));
+new Chart(document.getElementById("equityChart"), {
+  type: "line",
+  data: { labels, datasets: [
+    { label: "Account value", data: S.map(p => p.equity), borderColor: "#2f5fb3", backgroundColor: "rgba(47,95,179,.08)", fill: true, tension: .25, pointRadius: 3 },
+    { label: "Starting $100k", data: S.map(() => D.start_capital), borderColor: "#9ca3af", borderDash: [5, 5], pointRadius: 0, borderWidth: 1 },
+  ] },
+  options: { maintainAspectRatio: false, interaction: { mode: "index", intersect: false },
+    scales: { y: { ticks: { callback: v => usd(v, 0) } } },
+    plugins: { tooltip: { callbacks: { label: c => `${c.dataset.label}: ${usd(c.parsed.y)}` } } } },
+});
+
+// Returns chart
+const tickers = Object.keys(D.baseline);
+const returnsChart = new Chart(document.getElementById("returnsChart"), {
+  type: "line",
+  data: { labels, datasets: tickers.map(t => ({
+    label: t, data: S.map(p => p.returns[t] * 100),
+    borderColor: colorOf[t], backgroundColor: colorOf[t],
+    borderDash: heldNow.has(t) ? [] : [6, 4], borderWidth: heldNow.has(t) ? 2.5 : 1.5,
+    pointRadius: heldNow.has(t) ? 2.5 : 0, tension: .25, hidden: !heldNow.has(t),
+  })) },
+  options: { maintainAspectRatio: false, interaction: { mode: "nearest", intersect: false },
+    scales: { y: { ticks: { callback: v => v + "%" } } },
+    plugins: { tooltip: { callbacks: { label: c => `${c.dataset.label} (${sectorOf[c.dataset.label]}): ${pct(c.parsed.y / 100)}` } } } },
+});
+function setReturnsView(all) {
+  returnsChart.data.datasets.forEach(ds => ds.hidden = !all && !heldNow.has(ds.label));
+  returnsChart.update();
+  document.getElementById("showAll").classList.toggle("on", all);
+  document.getElementById("showHeld").classList.toggle("on", !all);
+}
+document.getElementById("showHeld").onclick = () => setReturnsView(false);
+document.getElementById("showAll").onclick = () => setReturnsView(true);
+
+// Holdings
+const hs = [...last.holdings].sort((a, b) => b.unrealized - a.unrealized);
+document.getElementById("holdings").innerHTML =
+  `<tr><th>Stock</th><th>Sector</th><th class="n">Shares</th><th class="n">Avg cost</th><th class="n">Last close</th><th class="n">Value</th><th class="n">Unrealized P&amp;L</th></tr>` +
+  hs.map(h => `<tr><td class="held">${h.ticker} <span class="sub">${esc(D.names[h.ticker] || "")}</span></td>
+    <td>${esc(sectorOf[h.ticker] || "")}</td><td class="n">${h.shares}</td><td class="n">${usd(h.avg_cost)}</td>
+    <td class="n">${usd(h.close)}${last.carried.includes(h.ticker) ? "*" : ""}</td><td class="n">${usd(h.value)}</td>
+    <td class="n ${cls(h.unrealized)}">${sgnUsd(h.unrealized)} (${pct(h.unrealized / h.cost)})</td></tr>`).join("") +
+  `<tr><td class="held">Total</td><td></td><td></td><td></td><td></td><td class="n held">${usd(last.invested)}</td>
+    <td class="n held ${cls(last.unrealized)}">${sgnUsd(last.unrealized)}</td></tr>`;
+
+// Pairs
+const latestReview = [...D.reviews].reverse().find(r => r.matrix.length);
+const statusBySector = {}; latestReview.matrix.forEach(m => statusBySector[m.sector] ??= m.status);
+document.getElementById("pairs").innerHTML =
+  `<tr><th>Sector</th><th>Owned</th><th class="n">Return</th><th>Alternative</th><th class="n">Return</th><th class="n">Gap</th><th>Status</th></tr>` +
+  D.sectors.flatMap(s => {
+    const held = s.tickers.find(t => heldNow.has(t));
+    return s.tickers.filter(t => t !== held).map(alt => {
+      const hr = last.returns[held], ar = last.returns[alt], gap = (ar - hr) * 100;
+      const st = statusBySector[s.sector] || "";
+      return `<tr><td>${esc(s.sector)}</td><td class="held">${held}</td><td class="n ${cls(hr)}">${pct(hr)}</td>
+        <td>${alt}</td><td class="n ${cls(ar)}">${pct(ar)}</td>
+        <td class="n ${gap >= 5 ? "down" : ""}">${gap > 0 ? "+" : gap < 0 ? "−" : ""}${Math.abs(gap).toFixed(2)} pp</td>
+        <td><span class="tag ${statusClass(st)}">${esc(st)}</span></td></tr>`;
+    });
+  }).join("");
+
+// Return grid (stocks × dates)
+const gridTickers = D.sectors.flatMap(s => s.tickers);
+document.getElementById("grid").innerHTML =
+  `<tr><th>Stock</th>${S.map(p => `<th class="n">${fmtDate(p.date)}</th>`).join("")}</tr>` +
+  gridTickers.map(t => `<tr><td class="${heldNow.has(t) ? "held" : ""}">${t}</td>${S.map(p => {
+    const r = p.returns[t], star = p.carried.includes(t) ? "*" : "";
+    const a = Math.min(Math.abs(r) / 0.10, 1) * 0.35;
+    const bg = r > 0 ? `rgba(15,138,75,${a})` : r < 0 ? `rgba(198,40,40,${a})` : "transparent";
+    return `<td class="n" style="background:${bg}" title="${t} ${fmtDate(p.date)}: $${p.closes[t]}">${pct(r, 1)}${star}</td>`;
+  }).join("")}</tr>`).join("") +
+  `<tr><td class="held">Account</td>${S.map(p => { const r = p.equity / D.start_capital - 1;
+    return `<td class="n held ${cls(r)}">${pct(r, 1)}</td>`; }).join("")}</tr>`;
+if (S.some(p => p.carried.length))
+  document.getElementById("grid").insertAdjacentHTML("afterend", `<div class="sub">* Price unavailable that day; prior close shown.</div>`);
+
+// Reviews
+const sel = document.getElementById("reviewSel");
+const reviews = [...D.reviews].reverse();
+sel.innerHTML = reviews.map((r, i) => `<option value="${i}">${fmtDate(r.date)}${r.headlines.length ? ` — ${r.headlines.length} headlines` : " — opening trades"}</option>`).join("");
+function renderReview(r) {
+  let h = `<div class="sub">${esc(r.title)}${r.price_date ? ` · prices as of ${fmtDate(r.price_date)} close` : ""}</div>`;
+  if (r.decision) h += `<p class="decision">${r.decision}</p>`;
+  if (r.headlines.length) h += `<h2 style="margin-top:14px">Headlines evaluated</h2>` + r.headlines.map(x => `
+    <div class="headline">
+      <div>${x.stocks ? x.stocks.split(/[,;/]\s*/).filter(Boolean).map(s => `<span class="tag">${esc(s)}</span>`).join("") : ""} ${x.event}</div>
+      ${x.status ? `<div class="meta">${x.status}</div>` : ""}
+      ${x.implication ? `<div class="impl">→ ${x.implication}</div>` : ""}
+    </div>`).join("");
+  if (r.matrix.length) h += `<details><summary>Decision for each sector</summary><div class="scroll"><table>
+    <tr><th>Sector</th><th>Pair</th><th>Status</th><th>A / B / C tests</th><th>What to watch</th></tr>
+    ${r.matrix.map(m => `<tr><td>${esc(m.sector)}</td><td>${esc(m.pair)}</td><td><span class="tag ${statusClass(m.status)}">${esc(m.status)}</span></td><td>${m.abc}</td><td>${m.action}</td></tr>`).join("")}
+    </table></div></details>`;
+  if (r.watch.length) h += `<details><summary>Things to watch next</summary><ul>${r.watch.map(w => `<li>${w}</li>`).join("")}</ul></details>`;
+  document.getElementById("review").innerHTML = h;
+}
+sel.onchange = () => renderReview(reviews[sel.value]);
+renderReview(reviews[0]);
+
+// Trades
+document.getElementById("trades").innerHTML =
+  `<tr><th>Date</th><th>Action</th><th>Stock</th><th class="n">Shares</th><th class="n">Price</th><th class="n">Amount</th></tr>` +
+  [...D.trades].reverse().map(t => `<tr><td>${fmtDate(t.date)}</td><td><span class="tag ${t.side === "sell" ? "st-SWITCH" : "st-HOLD"}">${t.side.toUpperCase()}</span></td>
+    <td class="held">${t.ticker}</td><td class="n">${t.shares}</td><td class="n">${usd(t.price)}</td><td class="n">${usd(t.shares * t.price)}</td></tr>`).join("");
+</script>
+</body>
+</html>
