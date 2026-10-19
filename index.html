@@ -107,14 +107,16 @@
 
 <script>
 const D = window.DATA;
-const S = D.series, last = S[S.length - 1], prev = S[S.length - 2];
+const S = D.series, last = S[S.length - 1], C = D.current;
+// Compare against the last close-marked point that predates the current account state.
+const prev = C.date > last.date && D.trades.some(t => t.date > last.date) ? last : S[S.length - 2];
 const usd = (v, d = 2) => v.toLocaleString("en-US", { style: "currency", currency: "USD", minimumFractionDigits: d, maximumFractionDigits: d });
 const pct = (v, d = 2) => (v > 0 ? "+" : v < 0 ? "−" : "") + Math.abs(v * 100).toFixed(d) + "%";
 const sgnUsd = v => (v > 0 ? "+" : v < 0 ? "−" : "") + usd(Math.abs(v));
 const cls = v => v > 0 ? "up" : v < 0 ? "down" : "";
 const esc = s => String(s).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 const fmtDate = iso => new Date(iso + "T12:00:00").toLocaleDateString("en-US", { month: "short", day: "numeric" });
-const heldNow = new Set(last.holdings.map(h => h.ticker));
+const heldNow = new Set(C.holdings.map(h => h.ticker));
 const sectorOf = {}; D.sectors.forEach(s => s.tickers.forEach(t => sectorOf[t] = s.sector));
 const palette = ["#2f5fb3", "#c2185b", "#00897b", "#ef6c00", "#6a1b9a", "#5d4037", "#1e88e5", "#7cb342"];
 const colorOf = {}; D.sectors.forEach((s, i) => s.tickers.forEach(t => colorOf[t] = palette[i % palette.length]));
@@ -122,16 +124,17 @@ const statusClass = s => { const u = s.toUpperCase(); return u.includes("SWITCH"
 
 // Header + KPIs
 document.getElementById("asof").textContent =
-  `As of ${fmtDate(last.date)} close · started ${fmtDate(D.baseline_date)} with ${usd(D.start_capital, 0)}`;
+  (C.date > C.marks_date ? `As of ${fmtDate(C.date)} · prices from ${fmtDate(C.marks_date)} close` : `As of ${fmtDate(C.date)} close`) +
+  ` · started ${fmtDate(D.baseline_date)} with ${usd(D.start_capital, 0)}`;
 document.getElementById("gen").textContent = `Last updated ${D.generated.replace("T", " ")}.`;
-const totalRet = last.equity / D.start_capital - 1;
+const totalRet = C.equity / D.start_capital - 1;
 const kpis = [
-  ["Account value", usd(last.equity), ""],
+  ["Account value", usd(C.equity), ""],
   ["Total return", pct(totalRet), cls(totalRet)],
-  ["Since last review", sgnUsd(last.equity - prev.equity), cls(last.equity - prev.equity)],
-  ["Unrealized P&L", sgnUsd(last.unrealized), cls(last.unrealized)],
-  ["Realized P&L", sgnUsd(last.realized), cls(last.realized)],
-  ["Cash", usd(last.cash), ""],
+  [`Since ${fmtDate(prev.date)}`, sgnUsd(C.equity - prev.equity), cls(C.equity - prev.equity)],
+  ["Unrealized P&L", sgnUsd(C.unrealized), cls(C.unrealized)],
+  ["Realized P&L", sgnUsd(C.realized), cls(C.realized)],
+  ["Cash", usd(C.cash), ""],
 ];
 document.getElementById("kpis").innerHTML = kpis.map(([l, v, c]) =>
   `<div class="kpi"><div class="label">${l}</div><div class="value ${c}">${v}</div></div>`).join("");
@@ -173,15 +176,15 @@ document.getElementById("showHeld").onclick = () => setReturnsView(false);
 document.getElementById("showAll").onclick = () => setReturnsView(true);
 
 // Holdings
-const hs = [...last.holdings].sort((a, b) => b.unrealized - a.unrealized);
+const hs = [...C.holdings].sort((a, b) => b.unrealized - a.unrealized);
 document.getElementById("holdings").innerHTML =
   `<tr><th>Stock</th><th>Sector</th><th class="n">Shares</th><th class="n">Avg cost</th><th class="n">Last close</th><th class="n">Value</th><th class="n">Unrealized P&amp;L</th></tr>` +
   hs.map(h => `<tr><td class="held">${h.ticker} <span class="sub">${esc(D.names[h.ticker] || "")}</span></td>
     <td>${esc(sectorOf[h.ticker] || "")}</td><td class="n">${h.shares}</td><td class="n">${usd(h.avg_cost)}</td>
-    <td class="n">${usd(h.close)}${last.carried.includes(h.ticker) ? "*" : ""}</td><td class="n">${usd(h.value)}</td>
+    <td class="n">${usd(h.close)}${C.carried.includes(h.ticker) ? "*" : ""}</td><td class="n">${usd(h.value)}</td>
     <td class="n ${cls(h.unrealized)}">${sgnUsd(h.unrealized)} (${pct(h.unrealized / h.cost)})</td></tr>`).join("") +
-  `<tr><td class="held">Total</td><td></td><td></td><td></td><td></td><td class="n held">${usd(last.invested)}</td>
-    <td class="n held ${cls(last.unrealized)}">${sgnUsd(last.unrealized)}</td></tr>`;
+  `<tr><td class="held">Total</td><td></td><td></td><td></td><td></td><td class="n held">${usd(C.invested)}</td>
+    <td class="n held ${cls(C.unrealized)}">${sgnUsd(C.unrealized)}</td></tr>`;
 
 // Pairs
 const latestReview = [...D.reviews].reverse().find(r => r.matrix.length);
@@ -191,7 +194,7 @@ document.getElementById("pairs").innerHTML =
   D.sectors.flatMap(s => {
     const held = s.tickers.find(t => heldNow.has(t));
     return s.tickers.filter(t => t !== held).map(alt => {
-      const hr = last.returns[held], ar = last.returns[alt], gap = (ar - hr) * 100;
+      const hr = C.returns[held], ar = C.returns[alt], gap = (ar - hr) * 100;
       const st = statusBySector[s.sector] || "";
       return `<tr><td>${esc(s.sector)}</td><td class="held">${held}</td><td class="n ${cls(hr)}">${pct(hr)}</td>
         <td>${alt}</td><td class="n ${cls(ar)}">${pct(ar)}</td>
