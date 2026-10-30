@@ -6,7 +6,7 @@
 <title>Paper Trading Tracker</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/marked@12.0.2/marked.min.js"></script>
-<script src="data.js?v=e7105ad5ef"></script>
+<script src="data.js?v=0da8a4a036"></script>
 <style>
   :root { --bg:#f6f7f9; --card:#fff; --ink:#1d2433; --muted:#6b7280; --line:#e5e7eb;
           --up:#0f8a4b; --down:#c62828; --warn:#b26a00; }
@@ -69,7 +69,16 @@
 
   <section class="card">
     <h2>Account value</h2>
+    <div class="toolbar" id="idxToolbar" hidden>
+      <button id="idxToggle">Compare to market indexes</button>
+      <span class="sub">Dashed lines = what $100,000 in each index at the Sept 16 close would be worth</span>
+    </div>
     <div class="chart-wrap"><canvas id="equityChart"></canvas></div>
+    <div id="idxCompare" hidden>
+      <h2 style="margin-top:16px">Compared with the market</h2>
+      <div class="scroll"><table id="idxTable"></table></div>
+      <div class="sub" id="idxNote" style="margin-top:6px"></div>
+    </div>
   </section>
 
   <section class="card">
@@ -165,16 +174,49 @@ if (D.conclusion && window.marked) {
 // Equity chart (plus the final cash balance once everything is sold)
 const labels = S.map(p => fmtDate(p.date));
 const eqPts = closed && C.date > last.date ? [...S, C] : S;
-new Chart(document.getElementById("equityChart"), {
+// Benchmarks: $100k at the baseline close, compounded from the index report's daily changes.
+const I = D.indexes, idxColors = ["#ef6c00", "#6a1b9a", "#00897b"];
+const idxAt = (n, d) => { const ds = Object.keys(I.cumulative).filter(x => x <= d).sort(); return ds.length ? I.cumulative[ds.at(-1)][n] : 0; };
+const idxSets = I ? I.names.map((n, i) => ({
+  label: n, data: eqPts.map(p => D.start_capital * (1 + idxAt(n, p.date))), hidden: true, isIndex: true,
+  borderColor: idxColors[i % idxColors.length], backgroundColor: idxColors[i % idxColors.length],
+  borderDash: [6, 4], borderWidth: 2, pointRadius: 0, tension: .25,
+})) : [];
+const equityChart = new Chart(document.getElementById("equityChart"), {
   type: "line",
   data: { labels: eqPts.map(p => fmtDate(p.date)), datasets: [
     { label: "Account value", data: eqPts.map(p => p.equity), borderColor: "#2f5fb3", backgroundColor: "rgba(47,95,179,.08)", fill: true, tension: .25, pointRadius: 3 },
     { label: "Starting $100k", data: eqPts.map(() => D.start_capital), borderColor: "#9ca3af", borderDash: [5, 5], pointRadius: 0, borderWidth: 1 },
+    ...idxSets,
   ] },
   options: { maintainAspectRatio: false, interaction: { mode: "index", intersect: false },
     scales: { y: { ticks: { callback: v => usd(v, 0) } } },
-    plugins: { tooltip: { callbacks: { label: c => `${c.dataset.label}: ${usd(c.parsed.y)}` } } } },
+    plugins: { legend: { labels: { filter: (item, data) => !data.datasets[item.datasetIndex].isIndex || !item.hidden } },
+      tooltip: { callbacks: { label: c => `${c.dataset.isIndex ? "$100k in " : ""}${c.dataset.label}: ${usd(c.parsed.y)}` +
+        (c.dataset.isIndex ? ` (${pct(c.parsed.y / D.start_capital - 1)})` : "") } } } },
 });
+if (I) {
+  let on = false;
+  document.getElementById("idxToolbar").hidden = false;
+  document.getElementById("idxToggle").onclick = e => {
+    on = !on; e.target.classList.toggle("on", on);
+    equityChart.data.datasets.forEach(ds => { if (ds.isIndex) ds.hidden = !on; });
+    equityChart.update();
+  };
+  const end = eqPts.at(-1), acct = end.equity / D.start_capital - 1;
+  const ret = n => I.stated?.[n] ?? idxAt(n, end.date);
+  document.getElementById("idxTable").innerHTML =
+    `<tr><th></th><th class="n">Return ${fmtDate(D.baseline_date)} → ${fmtDate(end.date)}</th><th class="n">$100k became</th><th class="n">Our account vs. this</th></tr>` +
+    `<tr><td class="held">Our account</td><td class="n held ${cls(acct)}">${pct(acct)}</td><td class="n held">${usd(end.equity)}</td><td></td></tr>` +
+    I.names.map(n => { const r = ret(n), diff = (acct - r) * 100;
+      return `<tr><td>${esc(n)}</td><td class="n ${cls(r)}">${pct(r)}</td><td class="n">${usd(D.start_capital * (1 + r))}</td>
+        <td class="n ${cls(diff)}">${diff >= 0 ? "Ahead by" : "Behind by"} ${Math.abs(diff).toFixed(2)} pp</td></tr>`; }).join("");
+  document.getElementById("idxNote").textContent =
+    `Index returns are price-only (no dividends), measured from the ${fmtDate(D.baseline_date)} close` +
+    (I.intraday ? `; ${fmtDate(I.intraday)} index values are intraday` : "") +
+    `. Our account started with $100,000 cash and bought at ${fmtDate(D.baseline_date)} fill prices. Source: ${I.file}.`;
+  document.getElementById("idxCompare").hidden = false;
+}
 
 // Returns chart
 const tickers = Object.keys(D.baseline);
