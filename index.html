@@ -5,7 +5,8 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Paper Trading Tracker</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
-<script src="data.js?v=8e59bfbd09"></script>
+<script src="https://cdn.jsdelivr.net/npm/marked@12.0.2/marked.min.js"></script>
+<script src="data.js?v=e7105ad5ef"></script>
 <style>
   :root { --bg:#f6f7f9; --card:#fff; --ink:#1d2433; --muted:#6b7280; --line:#e5e7eb;
           --up:#0f8a4b; --down:#c62828; --warn:#b26a00; }
@@ -45,6 +46,10 @@
   .decision { background:#f3f6fb; border-left:3px solid #4b6cb7; padding:8px 12px; border-radius:4px; }
   footer { color:var(--muted); font-size:.8rem; margin:24px 0; }
   a { color:#2f5fb3; }
+  .md h1 { display:none; } .md h2 { margin-top:1.2rem; } .md h3 { font-size:1rem; margin:1rem 0 .4rem; }
+  .md blockquote { margin:.6rem 0; padding:6px 12px; background:#f3f6fb; border-left:3px solid #4b6cb7; border-radius:4px; }
+  .md table { margin:.5rem 0; } .md td:not(:first-child), .md th:not(:first-child) { white-space:nowrap; }
+  .md p:first-child { margin-top:0; }
 </style>
 </head>
 <body>
@@ -55,6 +60,12 @@
   </header>
 
   <section class="kpis" id="kpis"></section>
+
+  <section class="card" id="conclusionCard" hidden>
+    <h2>🏁 Final results</h2>
+    <div class="md" id="conclusionSummary"></div>
+    <details><summary>Read the full conclusion</summary><div class="md scroll" id="conclusionRest"></div></details>
+  </section>
 
   <section class="card">
     <h2>Account value</h2>
@@ -72,7 +83,7 @@
   </section>
 
   <section class="card">
-    <h2>Current holdings</h2>
+    <h2 id="holdingsTitle">Current holdings</h2>
     <div class="scroll"><table id="holdings"></table></div>
   </section>
 
@@ -116,7 +127,9 @@ const sgnUsd = v => (v > 0 ? "+" : v < 0 ? "−" : "") + usd(Math.abs(v));
 const cls = v => v > 0 ? "up" : v < 0 ? "down" : "";
 const esc = s => String(s).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 const fmtDate = iso => new Date(iso + "T12:00:00").toLocaleDateString("en-US", { month: "short", day: "numeric" });
-const heldNow = new Set(C.holdings.map(h => h.ticker));
+// After the final liquidation there are no open positions; treat the last held set as "owned".
+const closed = C.holdings.length === 0 && D.trades.length > 0;
+const heldNow = new Set((closed ? last : C).holdings.map(h => h.ticker));
 const sectorOf = {}; D.sectors.forEach(s => s.tickers.forEach(t => sectorOf[t] = s.sector));
 const palette = ["#2f5fb3", "#c2185b", "#00897b", "#ef6c00", "#6a1b9a", "#5d4037", "#1e88e5", "#7cb342"];
 const colorOf = {}; D.sectors.forEach((s, i) => s.tickers.forEach(t => colorOf[t] = palette[i % palette.length]));
@@ -124,12 +137,13 @@ const statusClass = s => { const u = s.toUpperCase(); return u.includes("SWITCH"
 
 // Header + KPIs
 document.getElementById("asof").textContent =
-  (C.date > C.marks_date ? `As of ${fmtDate(C.date)} · prices from ${fmtDate(C.marks_date)} close` : `As of ${fmtDate(C.date)} close`) +
+  (closed ? `Final · all positions closed ${fmtDate(C.date)}`
+    : C.date > C.marks_date ? `As of ${fmtDate(C.date)} · prices from ${fmtDate(C.marks_date)} close` : `As of ${fmtDate(C.date)} close`) +
   ` · started ${fmtDate(D.baseline_date)} with ${usd(D.start_capital, 0)}`;
 document.getElementById("gen").textContent = `Last updated ${D.generated.replace("T", " ")}.`;
 const totalRet = C.equity / D.start_capital - 1;
 const kpis = [
-  ["Account value", usd(C.equity), ""],
+  [closed ? "Final account value" : "Account value", usd(C.equity), ""],
   ["Total return", pct(totalRet), cls(totalRet)],
   [`Since ${fmtDate(prev.date)}`, sgnUsd(C.equity - prev.equity), cls(C.equity - prev.equity)],
   ["Unrealized P&L", sgnUsd(C.unrealized), cls(C.unrealized)],
@@ -139,13 +153,23 @@ const kpis = [
 document.getElementById("kpis").innerHTML = kpis.map(([l, v, c]) =>
   `<div class="kpi"><div class="label">${l}</div><div class="value ${c}">${v}</div></div>`).join("");
 
-// Equity chart
+// Conclusion (executive summary shown, the rest collapsed)
+if (D.conclusion && window.marked) {
+  const md = D.conclusion.markdown, cut = md.search(/^## /m) >= 0 ? md.indexOf("\n## ", md.search(/^## /m) + 1) : -1;
+  document.getElementById("conclusionSummary").innerHTML = marked.parse(cut > 0 ? md.slice(0, cut) : md);
+  if (cut > 0) document.getElementById("conclusionRest").innerHTML = marked.parse(md.slice(cut));
+  else document.querySelector("#conclusionCard details").hidden = true;
+  document.getElementById("conclusionCard").hidden = false;
+}
+
+// Equity chart (plus the final cash balance once everything is sold)
 const labels = S.map(p => fmtDate(p.date));
+const eqPts = closed && C.date > last.date ? [...S, C] : S;
 new Chart(document.getElementById("equityChart"), {
   type: "line",
-  data: { labels, datasets: [
-    { label: "Account value", data: S.map(p => p.equity), borderColor: "#2f5fb3", backgroundColor: "rgba(47,95,179,.08)", fill: true, tension: .25, pointRadius: 3 },
-    { label: "Starting $100k", data: S.map(() => D.start_capital), borderColor: "#9ca3af", borderDash: [5, 5], pointRadius: 0, borderWidth: 1 },
+  data: { labels: eqPts.map(p => fmtDate(p.date)), datasets: [
+    { label: "Account value", data: eqPts.map(p => p.equity), borderColor: "#2f5fb3", backgroundColor: "rgba(47,95,179,.08)", fill: true, tension: .25, pointRadius: 3 },
+    { label: "Starting $100k", data: eqPts.map(() => D.start_capital), borderColor: "#9ca3af", borderDash: [5, 5], pointRadius: 0, borderWidth: 1 },
   ] },
   options: { maintainAspectRatio: false, interaction: { mode: "index", intersect: false },
     scales: { y: { ticks: { callback: v => usd(v, 0) } } },
@@ -175,7 +199,22 @@ function setReturnsView(all) {
 document.getElementById("showHeld").onclick = () => setReturnsView(false);
 document.getElementById("showAll").onclick = () => setReturnsView(true);
 
-// Holdings
+// Holdings (or, once closed, the final exits)
+if (closed) {
+  const exits = D.trades.filter(t => t.date === C.date && t.side === "sell");
+  const costOf = Object.fromEntries(last.holdings.map(h => [h.ticker, h]));
+  let tc = 0, tp = 0;
+  document.getElementById("holdingsTitle").textContent = `Final positions (all sold ${fmtDate(C.date)})`;
+  document.getElementById("showHeld").textContent = "Final holdings";
+  document.getElementById("holdings").innerHTML =
+    `<tr><th>Stock</th><th>Sector</th><th class="n">Shares</th><th class="n">Avg cost</th><th class="n">Sale price</th><th class="n">Proceeds</th><th class="n">Realized P&amp;L</th></tr>` +
+    exits.map(t => { const h = costOf[t.ticker], cost = h.avg_cost * t.shares, pr = t.shares * t.price, pl = pr - cost; tc += cost; tp += pr;
+      return `<tr><td class="held">${t.ticker} <span class="sub">${esc(D.names[t.ticker] || "")}</span></td>
+      <td>${esc(sectorOf[t.ticker] || "")}</td><td class="n">${t.shares}</td><td class="n">${usd(h.avg_cost)}</td>
+      <td class="n">${usd(t.price)}</td><td class="n">${usd(pr)}</td><td class="n ${cls(pl)}">${sgnUsd(pl)} (${pct(pl / cost)})</td></tr>`; }).join("") +
+    `<tr><td class="held">Total</td><td></td><td></td><td></td><td></td><td class="n held">${usd(tp)}</td>
+      <td class="n held ${cls(tp - tc)}">${sgnUsd(tp - tc)}</td></tr>`;
+} else {
 const hs = [...C.holdings].sort((a, b) => b.unrealized - a.unrealized);
 document.getElementById("holdings").innerHTML =
   `<tr><th>Stock</th><th>Sector</th><th class="n">Shares</th><th class="n">Avg cost</th><th class="n">Last close</th><th class="n">Value</th><th class="n">Unrealized P&amp;L</th></tr>` +
@@ -185,6 +224,7 @@ document.getElementById("holdings").innerHTML =
     <td class="n ${cls(h.unrealized)}">${sgnUsd(h.unrealized)} (${pct(h.unrealized / h.cost)})</td></tr>`).join("") +
   `<tr><td class="held">Total</td><td></td><td></td><td></td><td></td><td class="n held">${usd(C.invested)}</td>
     <td class="n held ${cls(C.unrealized)}">${sgnUsd(C.unrealized)}</td></tr>`;
+}
 
 // Pairs
 const latestReview = [...D.reviews].reverse().find(r => r.matrix.length);
